@@ -46,6 +46,13 @@ function convertCoords(la, ln) {
         '+' + Math.floor(aLng) + '°' + convertToMinutes(aLng % 1) + "'" + convertToSeconds(aLng % 1) + '"' + getLngDir(ln);
 }
 
+function isTypingTarget(el) {
+    if (!el) return false;
+    if (el.isContentEditable) return true;
+    const tag = (el.tagName || '').toLowerCase();
+    return tag === 'input' || tag === 'textarea' || tag === 'select';
+}
+
 function getCountryName(code) {
     try {
         if (!code) return null;
@@ -554,9 +561,10 @@ function makeSettingsToggle(key, label, iconSrc) {
 
 document.addEventListener('keydown', async function (event) {
     if (lat === 999 && long === 999) return;
+    if (isTypingTarget(event.target)) return;
     const isMac = /Mac|iPhone|iPad|iPod/.test(navigator.platform);
     const isAutoPlaceKey = isMac
-        ? (event.metaKey && event.code === 'Enter')
+        ? (event.metaKey && event.altKey && event.code === 'KeyP')
         : (event.ctrlKey && event.code === 'Space');
     const modKey = event.ctrlKey || event.metaKey; // Ctrl (Win/Linux) or Command (macOS)
     if (isAutoPlaceKey && localStorage.getItem('safeMode') === 'false') {
