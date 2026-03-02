@@ -23,27 +23,34 @@
     };
 })(XMLHttpRequest);
 
-
-
 const { fetch: origFetch } = window;
-window.fetch = async (...args) => {
-    const response = await origFetch(...args);
-    try {
-        const url = typeof args[0] === 'string' ? args[0] : (args[0]?.url || '');
-        const clone = response.clone();
-        const ct = response.headers.get('content-type') || '';
-        // Intercept all text-like responses (JSON, text, protobuf, octet-stream)
-        if (ct.includes('json') || ct.includes('text') || ct.includes('protobuf') || ct.includes('octet')) {
-            clone.text().then(text => {
-                window.postMessage({ type: 'fetch', url: url, data: text }, '*');
-            }).catch(() => {});
-        }
-        // Also try to intercept any application/* types we might have missed
-        else if (ct.includes('application')) {
-            clone.text().then(text => {
-                window.postMessage({ type: 'fetch', url: url, data: text }, '*');
-            }).catch(() => {});
-        }
-    } catch (e) {}
-    return response;
+
+function shouldInterceptFetch(url) {
+    if (!url) return false;
+    return url.includes('geoguessr.com') ||
+        url.includes('game-server.geoguessr.com') ||
+        url.includes('maps.googleapis.com');
+}
+
+window.fetch = (...args) => {
+    const url = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url) || '';
+    const p = origFetch(...args);
+
+    // Do not touch unrelated third-party requests (ads, trackers, etc.).
+    if (!shouldInterceptFetch(url)) return p;
+
+    return p.then((response) => {
+        try {
+            const clone = response.clone();
+            const ct = response.headers.get('content-type') || '';
+            // Intercept text-like API payloads only.
+            if (ct.includes('json') || ct.includes('text') || ct.includes('protobuf') ||
+                ct.includes('octet') || ct.includes('application')) {
+                clone.text().then((text) => {
+                    window.postMessage({ type: 'fetch', url: url, data: text }, '*');
+                }).catch(() => {});
+            }
+        } catch {}
+        return response;
+    });
 };
