@@ -32,12 +32,27 @@ function shouldInterceptFetch(url) {
         url.includes('maps.googleapis.com');
 }
 
+function shouldSilenceFetchError(url) {
+    if (!url) return false;
+    return url.includes('pagead2.googlesyndication.com') ||
+        url.includes('securepubads.g.doubleclick.net') ||
+        url.includes('doubleclick.net');
+}
+
 window.fetch = (...args) => {
     const url = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url) || '';
     const p = origFetch(...args);
 
     // Do not touch unrelated third-party requests (ads, trackers, etc.).
-    if (!shouldInterceptFetch(url)) return p;
+    if (!shouldInterceptFetch(url)) {
+        return p.catch((err) => {
+            // Some ad requests fail intermittently and surface noisy unhandled rejections.
+            if (shouldSilenceFetchError(url)) {
+                return new Response('', { status: 204, statusText: 'No Content' });
+            }
+            throw err;
+        });
+    }
 
     return p.then((response) => {
         try {
