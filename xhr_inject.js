@@ -14,7 +14,7 @@
     XHR.send = function (postData) {
         this.addEventListener('load', function () {
             try {
-                window.postMessage({ type: 'xhr', data: this.response }, '*');
+                window.postMessage({ type: 'xhr', url: this._url || '', data: this.response }, '*');
             } catch {
                 return;
             }
@@ -28,7 +28,15 @@
 const { fetch: origFetch } = window;
 window.fetch = async (...args) => {
     const response = await origFetch(...args);
-    const clonedResponse = await response.clone().blob();
-    window.postMessage({ type: 'fetch', data: clonedResponse }, '*');
+    try {
+        const url = typeof args[0] === 'string' ? args[0] : (args[0]?.url || '');
+        const clone = response.clone();
+        const ct = response.headers.get('content-type') || '';
+        if (ct.includes('json') || ct.includes('text') || ct.includes('protobuf') || ct.includes('octet')) {
+            clone.text().then(text => {
+                window.postMessage({ type: 'fetch', url: url, data: text }, '*');
+            }).catch(() => {});
+        }
+    } catch (e) {}
     return response;
 };
