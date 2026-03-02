@@ -8,6 +8,18 @@ let lat = 999;
 let long = 999;
 let strCoord = null;
 let lastPlacedCoords = null;
+let lastRoundKey = null;
+let lastQuizSubmitKey = null;
+let quizState = {
+    gameId: null,
+    roundNumber: null,
+    answerType: null,
+    countryCode: null,
+    singleChoiceAlternative: null,
+    singleChoiceCoordinateAlternative: null,
+    singleChoiceText: null,
+    alreadyGuessed: false,
+};
 
 // ─── Utilities ─────────────────────────────────────────────────────
 
@@ -32,6 +44,122 @@ function convertCoords(la, ln) {
     const aLat = Math.abs(la), aLng = Math.abs(ln);
     return Math.floor(aLat) + '°' + convertToMinutes(aLat % 1) + "'" + convertToSeconds(aLat % 1) + '"' + getLatDir(la) +
         '+' + Math.floor(aLng) + '°' + convertToMinutes(aLng % 1) + "'" + convertToSeconds(aLng % 1) + '"' + getLngDir(ln);
+}
+
+function getCountryName(code) {
+    try {
+        if (!code) return null;
+        const upper = String(code).toUpperCase();
+        const dn = new Intl.DisplayNames(['en'], { type: 'region' });
+        return dn.of(upper) || upper;
+    } catch {
+        return String(code || '').toUpperCase() || null;
+    }
+}
+
+function getCurrentRoundData(obj) {
+    if (!obj || !Array.isArray(obj.rounds) || !obj.rounds.length) return null;
+    if (typeof obj.currentRoundNumber === 'number') {
+        for (let i = 0; i < obj.rounds.length; i++) {
+            if (obj.rounds[i] && obj.rounds[i].roundNumber === obj.currentRoundNumber) return obj.rounds[i];
+        }
+    }
+    return obj.rounds[obj.rounds.length - 1] || null;
+}
+
+function extractQuizState(obj) {
+    if (!obj || typeof obj !== 'object') return null;
+    if (!obj.gameId || !Array.isArray(obj.rounds)) return null;
+
+    const round = getCurrentRoundData(obj);
+    if (!round) return null;
+
+    const roundNumber = round.roundNumber;
+    const answer = round.answer || {};
+    const singleChoice = answer.singleChoicePayload || null;
+    const singleChoiceCoord = answer.singleChoiceCoordinatePayload || null;
+    const countryPayload = answer.countryAnswerPayload || null;
+    const correctAlt = singleChoice && typeof singleChoice.correctAlternative === 'number'
+        ? singleChoice.correctAlternative
+        : null;
+    const correctAltCoord = singleChoiceCoord && typeof singleChoiceCoord.correctAlternative === 'number'
+        ? singleChoiceCoord.correctAlternative
+        : null;
+    const altText = singleChoice && Array.isArray(singleChoice.alternatives) && typeof correctAlt === 'number'
+        ? (singleChoice.alternatives[correctAlt] && singleChoice.alternatives[correctAlt].text) || null
+        : null;
+
+    let guessed = false;
+    if (Array.isArray(obj.guesses)) {
+        for (let i = 0; i < obj.guesses.length; i++) {
+            if (obj.guesses[i] && obj.guesses[i].roundNumber === roundNumber) {
+                guessed = true;
+                break;
+            }
+        }
+    }
+
+    return {
+        gameId: obj.gameId,
+        roundNumber: roundNumber,
+        answerType: answer.type || null,
+        countryCode: countryPayload && countryPayload.countryCode ? String(countryPayload.countryCode).toLowerCase() : null,
+        singleChoiceAlternative: correctAlt,
+        singleChoiceCoordinateAlternative: correctAltCoord,
+        singleChoiceText: altText,
+        alreadyGuessed: guessed,
+        round: round,
+    };
+}
+
+async function submitLiveChallengeGuess(payload) {
+    if (!quizState.gameId || typeof quizState.roundNumber !== 'number') return false;
+    try {
+        const body = Object.assign({ roundNumber: quizState.roundNumber }, payload);
+        const res = await fetch('https://game-server.geoguessr.com/api/live-challenge/' + quizState.gameId + '/guess', {
+            method: 'POST',
+            credentials: 'include',
+            headers: {
+                'content-type': 'application/json',
+                'x-client': 'web',
+            },
+            body: JSON.stringify(body),
+        });
+        return res.ok;
+    } catch {
+        return false;
+    }
+}
+
+async function runQuizCheat() {
+    if (localStorage.getItem('autoQuiz') === 'false') return;
+    if (!quizState.gameId || typeof quizState.roundNumber !== 'number') return;
+    if (quizState.alreadyGuessed) return;
+
+    const submitKey = quizState.gameId + ':' + quizState.roundNumber + ':' + quizState.answerType;
+    if (lastQuizSubmitKey === submitKey) return;
+
+    let ok = false;
+    if (quizState.answerType === 'Country' && quizState.countryCode) {
+        ok = await submitLiveChallengeGuess({ countryCode: quizState.countryCode });
+        if (ok) {
+            const name = getCountryName(quizState.countryCode);
+            showStatus('🌍 Country: ' + (name || quizState.countryCode.toUpperCase()) + ' (auto)');
+        }
+    } else if (quizState.answerType === 'SingleChoice' && typeof quizState.singleChoiceAlternative === 'number') {
+        ok = await submitLiveChallengeGuess({ singleChoiceAlternative: quizState.singleChoiceAlternative });
+        if (ok) {
+            const label = quizState.singleChoiceText ? ' -> ' + quizState.singleChoiceText : '';
+            showStatus('✅ Choice #' + (quizState.singleChoiceAlternative + 1) + label);
+        }
+    } else if (quizState.answerType === 'SingleChoiceCoordinate' && typeof quizState.singleChoiceCoordinateAlternative === 'number') {
+        ok = await submitLiveChallengeGuess({ singleChoiceCoordinateAlternative: quizState.singleChoiceCoordinateAlternative });
+        if (ok) {
+            showStatus('✅ Coordinate choice #' + (quizState.singleChoiceCoordinateAlternative + 1));
+        }
+    }
+
+    if (ok) lastQuizSubmitKey = submitKey;
 }
 
 // ─── Coordinate Extraction ─────────────────────────────────────────
@@ -94,6 +222,26 @@ function deepSearch(obj, depth) {
 // Parse GeoGuessr API JSON responses
 function extractFromApiResponse(obj) {
     try {
+        // live-challenge payload: use current round answer/question coordinate first
+        if (obj.gameId && Array.isArray(obj.rounds)) {
+            const round = getCurrentRoundData(obj);
+            if (round && round.answer && round.answer.coordinateAnswerPayload &&
+                round.answer.coordinateAnswerPayload.coordinate &&
+                isValidCoord(round.answer.coordinateAnswerPayload.coordinate.lat, round.answer.coordinateAnswerPayload.coordinate.lng)) {
+                return {
+                    lat: round.answer.coordinateAnswerPayload.coordinate.lat,
+                    lng: round.answer.coordinateAnswerPayload.coordinate.lng,
+                };
+            }
+            if (round && round.question && round.question.panoramaQuestionPayload &&
+                round.question.panoramaQuestionPayload.panorama &&
+                isValidCoord(round.question.panoramaQuestionPayload.panorama.lat, round.question.panoramaQuestionPayload.panorama.lng)) {
+                return {
+                    lat: round.question.panoramaQuestionPayload.panorama.lat,
+                    lng: round.question.panoramaQuestionPayload.panorama.lng,
+                };
+            }
+        }
         // /api/v3/games/{token} → rounds array
         if (obj.rounds && Array.isArray(obj.rounds) && obj.rounds.length) {
             const idx = (typeof obj.round === 'number') ? obj.round - 1 : obj.rounds.length - 1;
@@ -117,10 +265,11 @@ function processResponse(dataStr) {
         // Handle Google's XSSI prefix  )]}'
         const cleaned = dataStr.replace(/^\)\]\}'\s*\n?/, '');
         const parsed = JSON.parse(cleaned);
+        const quiz = extractQuizState(parsed);
         if (Array.isArray(parsed)) {
-            return extractFromKnownPaths(parsed) || deepSearch(parsed);
+            return { coords: extractFromKnownPaths(parsed) || deepSearch(parsed), quiz: null };
         } else if (typeof parsed === 'object' && parsed !== null) {
-            return extractFromApiResponse(parsed);
+            return { coords: extractFromApiResponse(parsed), quiz: quiz };
         }
     } catch {}
     return null;
@@ -138,10 +287,38 @@ window.addEventListener('message', async function (e) {
         try { data = await data.text(); } catch { return; }
     }
 
-    const coords = processResponse(data);
-    if (coords) {
-        lat = coords.lat;
-        long = coords.lng;
+    const parsed = processResponse(data);
+    if (!parsed) return;
+
+    if (parsed.quiz) {
+        quizState = parsed.quiz;
+        const roundKey = quizState.gameId + ':' + quizState.roundNumber;
+        if (lastRoundKey !== roundKey) {
+            lastRoundKey = roundKey;
+            lastPlacedCoords = null;
+        }
+
+        // Prevent stale coordinate guesses on non-coordinate rounds.
+        if (quizState.answerType && quizState.answerType !== 'Coordinate') {
+            lat = 999;
+            long = 999;
+        }
+
+        if (quizState.answerType === 'Country' && quizState.countryCode) {
+            const name = getCountryName(quizState.countryCode);
+            showStatus('🌍 Country hint: ' + (name || quizState.countryCode.toUpperCase()));
+        } else if (quizState.answerType === 'SingleChoice' && typeof quizState.singleChoiceAlternative === 'number') {
+            const label = quizState.singleChoiceText ? ' -> ' + quizState.singleChoiceText : '';
+            showStatus('💡 Choice #' + (quizState.singleChoiceAlternative + 1) + label);
+        }
+        runQuizCheat();
+    }
+
+    if (parsed.coords) {
+        // Ignore fallback coordinate extraction when current round is quiz-only.
+        if (quizState.answerType && quizState.answerType !== 'Coordinate') return;
+        lat = parsed.coords.lat;
+        long = parsed.coords.lng;
         strCoord = null;
         console.log('[ApvGuessr] 📍 Detected:', lat, long);
         showStatus('📍 ' + lat.toFixed(4) + ', ' + long.toFixed(4));
@@ -152,6 +329,7 @@ window.addEventListener('message', async function (e) {
 // ─── Auto-Play Logic ───────────────────────────────────────────────
 
 function onCoordsDetected() {
+    if (quizState.answerType && quizState.answerType !== 'Coordinate') return;
     const auto = localStorage.getItem('autoGuess') !== 'false';
     if (!auto) return;
 
@@ -301,6 +479,7 @@ function showStatus(text, duration) {
 window.addEventListener('load', function () {
     if (localStorage.getItem('safeMode') == null) localStorage.setItem('safeMode', 'true');
     if (localStorage.getItem('autoGuess') == null) localStorage.setItem('autoGuess', 'true');
+    if (localStorage.getItem('autoQuiz') == null) localStorage.setItem('autoQuiz', 'true');
 
     const pinImg = 'https://raw.githubusercontent.com/realapire/geoguessr-cheat/ui-fix/assets/view.png';
     const viewImg = 'https://raw.githubusercontent.com/realapire/geoguessr-cheat/ui-fix/assets/pin.png';
@@ -324,6 +503,7 @@ window.addEventListener('load', function () {
         if (menu && !menu.querySelector('.apv-opt')) {
             menu.appendChild(makeSettingsToggle('safeMode', 'Safe Mode', safeImg));
             menu.appendChild(makeSettingsToggle('autoGuess', 'Auto Guess', safeImg));
+            menu.appendChild(makeSettingsToggle('autoQuiz', 'Auto Quiz', safeImg));
         }
     }, 100);
 
@@ -374,11 +554,17 @@ function makeSettingsToggle(key, label, iconSrc) {
 
 document.addEventListener('keydown', async function (event) {
     if (lat === 999 && long === 999) return;
-    if (event.ctrlKey && event.code === 'Space' && localStorage.getItem('safeMode') === 'false') {
+    const isMac = /Mac|iPhone|iPad|iPod/.test(navigator.platform);
+    const isAutoPlaceKey = isMac
+        ? (event.metaKey && event.code === 'Enter')
+        : (event.ctrlKey && event.code === 'Space');
+    const modKey = event.ctrlKey || event.metaKey; // Ctrl (Win/Linux) or Command (macOS)
+    if (isAutoPlaceKey && localStorage.getItem('safeMode') === 'false') {
+        event.preventDefault();
         doAutoPlace(false);
         setTimeout(function () { doAutoGuess(); }, Math.random() * 2000 + 500);
     }
-    if (event.ctrlKey && event.shiftKey && localStorage.getItem('safeMode') === 'false') {
+    if (modKey && event.shiftKey && localStorage.getItem('safeMode') === 'false') {
         await tellLocation();
     }
 });
@@ -436,4 +622,3 @@ async function tellLocation() {
     document.body.appendChild(overlay);
     document.body.appendChild(popup);
 }
-

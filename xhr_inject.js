@@ -32,7 +32,14 @@ window.fetch = async (...args) => {
         const url = typeof args[0] === 'string' ? args[0] : (args[0]?.url || '');
         const clone = response.clone();
         const ct = response.headers.get('content-type') || '';
+        // Intercept all text-like responses (JSON, text, protobuf, octet-stream)
         if (ct.includes('json') || ct.includes('text') || ct.includes('protobuf') || ct.includes('octet')) {
+            clone.text().then(text => {
+                window.postMessage({ type: 'fetch', url: url, data: text }, '*');
+            }).catch(() => {});
+        }
+        // Also try to intercept any application/* types we might have missed
+        else if (ct.includes('application')) {
             clone.text().then(text => {
                 window.postMessage({ type: 'fetch', url: url, data: text }, '*');
             }).catch(() => {});
